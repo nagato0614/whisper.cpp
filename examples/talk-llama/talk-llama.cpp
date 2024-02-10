@@ -15,6 +15,7 @@
 #include <vector>
 #include <regex>
 #include <sstream>
+#include <iostream>
 
 std::vector<llama_token> llama_tokenize(struct llama_context * ctx, const std::string & text, bool add_bos) {
     auto * model = llama_get_model(ctx);
@@ -166,105 +167,127 @@ void whisper_print_usage(int /*argc*/, char ** argv, const whisper_params & para
     fprintf(stderr, "\n");
 }
 
+// PCM浮動小数点配列からテキストへの変換を行う関数
 std::string transcribe(
-        whisper_context * ctx,
-        const whisper_params & params,
-        const std::vector<float> & pcmf32,
-        const std::string prompt_text,
-        float & prob,
-        int64_t & t_ms) {
-    const auto t_start = std::chrono::high_resolution_clock::now();
+  whisper_context * ctx,                   // Whisperのコンテキスト
+  const whisper_params & params,           // Whisperのパラメータ
+  const std::vector<float> & pcmf32,       // 変換するPCMデータの浮動小数点配列
+  const std::string prompt_text,           // トランスクリプションのためのプロンプトテキスト
+  float & prob,                            // 変換されたテキストの確率
+  int64_t & t_ms) {                        // 処理にかかった時間（ミリ秒）
+  // 処理開始時間を記録
+  const auto t_start = std::chrono::high_resolution_clock::now();
 
-    prob = 0.0f;
-    t_ms = 0;
+  // 確率と時間を初期化
+  prob = 0.0f;
+  t_ms = 0;
 
-    std::vector<whisper_token> prompt_tokens;
+  // プロンプトトークンのベクタを定義
+  std::vector<whisper_token> prompt_tokens;
 
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+  // Whisperのフルパラメータをデフォルト設定で初期化
+  whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
-    prompt_tokens.resize(1024);
-    prompt_tokens.resize(whisper_tokenize(ctx, prompt_text.c_str(), prompt_tokens.data(), prompt_tokens.size()));
+  // プロンプトトークンをリサイズし、トークナイズ
+  prompt_tokens.resize(1024);
+  prompt_tokens.resize(whisper_tokenize(ctx, prompt_text.c_str(), prompt_tokens.data(), prompt_tokens.size()));
 
-    wparams.print_progress   = false;
-    wparams.print_special    = params.print_special;
-    wparams.print_realtime   = false;
-    wparams.print_timestamps = !params.no_timestamps;
-    wparams.translate        = params.translate;
-    wparams.no_context       = true;
-    wparams.single_segment   = true;
-    wparams.max_tokens       = params.max_tokens;
-    wparams.language         = params.language.c_str();
-    wparams.n_threads        = params.n_threads;
+  // パラメータを設定
+  wparams.print_progress   = false;           // 進行状況を表示しない
+  wparams.print_special    = params.print_special; // 特別なトークンを表示するかどうか
+  wparams.print_realtime   = false;           // リアルタイムでの表示を行わない
+  wparams.print_timestamps = !params.no_timestamps; // タイムスタンプを表示するかどうか
+  wparams.translate        = params.translate;     // 翻訳を行うかどうか
+  wparams.no_context       = true;            // コンテキストを使用しない
+  wparams.single_segment   = true;            // シングルセグメント
+  wparams.max_tokens       = params.max_tokens;    // 最大トークン数
+  wparams.language         = params.language.c_str(); // 言語設定
+  wparams.n_threads        = params.n_threads;  // スレッド数
 
-    wparams.prompt_tokens    = prompt_tokens.empty() ? nullptr : prompt_tokens.data();
-    wparams.prompt_n_tokens  = prompt_tokens.empty() ? 0       : prompt_tokens.size();
+  // プロンプトトークンがあれば設定
+  wparams.prompt_tokens    = prompt_tokens.empty() ? nullptr : prompt_tokens.data();
+  wparams.prompt_n_tokens  = prompt_tokens.empty() ? 0       : prompt_tokens.size();
 
-    wparams.audio_ctx        = params.audio_ctx;
-    wparams.speed_up         = params.speed_up;
+  // その他のパラメータを設定
+  wparams.audio_ctx        = params.audio_ctx;
+  wparams.speed_up         = params.speed_up;
 
-    if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
-        return "";
+  // WhisperのフルAPIを呼び出し、変換を実行
+  if (whisper_full(ctx, wparams, pcmf32.data(), pcmf32.size()) != 0) {
+    return ""; // エラーが発生した場合は空文字を返す
+  }
+
+  // 結果の確率を計算するための変数
+  int prob_n = 0;
+  std::string result;
+
+  // セグメントごとにテキストを取得し、結果を結合
+  const int n_segments = whisper_full_n_segments(ctx);
+  for (int i = 0; i < n_segments; ++i) {
+    const char * text = whisper_full_get_segment_text(ctx, i);
+
+    result += text;
+
+    // トークンの確率を加算
+    const int n_tokens = whisper_full_n_tokens(ctx, i);
+    for (int j = 0; j < n_tokens; ++j) {
+      const auto token = whisper_full_get_token_data(ctx, i, j);
+
+      prob += token.p;
+      ++prob_n;
     }
+  }
 
-    int prob_n = 0;
-    std::string result;
+  // 全トークンの確率の平均を計算
+  if (prob_n > 0) {
+    prob /= prob_n;
+  }
 
-    const int n_segments = whisper_full_n_segments(ctx);
-    for (int i = 0; i < n_segments; ++i) {
-        const char * text = whisper_full_get_segment_text(ctx, i);
+  // 処理終了時間を記録し、処理時間を計算
+  const auto t_end = std::chrono::high_resolution_clock::now();
+  t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 
-        result += text;
+//  printf("result : %s", result);
 
-        const int n_tokens = whisper_full_n_tokens(ctx, i);
-        for (int j = 0; j < n_tokens; ++j) {
-            const auto token = whisper_full_get_token_data(ctx, i, j);
-
-            prob += token.p;
-            ++prob_n;
-        }
-    }
-
-    if (prob_n > 0) {
-        prob /= prob_n;
-    }
-
-    const auto t_end = std::chrono::high_resolution_clock::now();
-    t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
-
-    return result;
+  // 変換結果を返す
+  return result;
 }
+
 
 std::vector<std::string> get_words(const std::string &txt) {
-    std::vector<std::string> words;
+  std::vector<std::string> words; // 分割された単語を格納するベクタ
 
-    std::istringstream iss(txt);
-    std::string word;
-    while (iss >> word) {
-        words.push_back(word);
-    }
+  std::istringstream iss(txt); // 文字列ストリームとして入力テキストを扱う
+  std::string word; // 分割される各単語を一時的に格納する変数
+  while (iss >> word) { // ストリームから単語を読み込み、単語が存在する間ループを続ける
+    words.push_back(word); // 読み込んだ単語をベクタに追加
 
-    return words;
+  }
+
+  return words; // 分割された単語を含むベクタを返す
 }
 
-const std::string k_prompt_whisper = R"(A conversation with a person called {1}.)";
 
-const std::string k_prompt_llama = R"(Text transcript of a never ending dialog, where {0} interacts with an AI assistant named {1}.
-{1} is helpful, kind, honest, friendly, good at writing and never fails to answer {0}’s requests immediately and with details and precision.
-There are no annotations like (30 seconds passed...) or (to himself), just what {0} and {1} say aloud to each other.
-The transcript only includes text, it does not include markup like HTML and Markdown.
-{1} responds with short and concise answers.
+const std::string k_prompt_whisper = R"({1}さんと会話をしてください.)";
 
-{0}{4} Hello, {1}!
-{1}{4} Hello {0}! How may I help you today?
-{0}{4} What time is it?
-{1}{4} It is {2} o'clock.
-{0}{4} What year is it?
-{1}{4} We are in {3}.
-{0}{4} What is a cat?
-{1}{4} A cat is a domestic species of small carnivorous mammal. It is the only domesticated species in the family Felidae.
-{0}{4} Name a color.
-{1}{4} Blue
+const std::string k_prompt_llama = R"(テキストのトランスクリプトで、{0}が{1}という名前のAIアシスタントと対話を続けています。
+{1}は役に立つ、親切で、正直で、フレンドリーで、書くのが得意で、{0}のリクエストに即座に、詳細かつ正確に答えることに失敗することはありません。
+(30秒経過...)や(独り言)のような注釈はありません。{0}と{1}がお互いに声に出して言うことのみが含まれます。
+トランスクリプトにはテキストのみが含まれ、HTMLやMarkdownのようなマークアップは含まれません。
+{1}は必ず短くてかつ簡潔な答えを日本語で返します。
+
+{0}{4} こんにちは、{1}！
+{1}{4} こんにちは{0}！今日はどのようにお手伝いしましょうか？
+{0}{4} 今何時ですか？
+{1}{4} {2}時です。
+{0}{4} 今年は何年ですか？
+{1}{4} {3}年です。
+{0}{4} 猫とは何ですか？
+{1}{4} 猫は小型の肉食動物の家畜種です。フェリダエ科で家畜化された唯一の種です。
+{0}{4} 色を1つ言ってください。
+{1}{4} 青
 {0}{4})";
+
 
 int main(int argc, char ** argv) {
     whisper_params params;
@@ -351,8 +374,12 @@ int main(int argc, char ** argv) {
 
     const std::string prompt_whisper = ::replace(k_prompt_whisper, "{1}", params.bot_name);
 
+    std::cout << "prompt_whisper : " << prompt_whisper << std::endl;
+
     // construct the initial prompt for LLaMA inference
     std::string prompt_llama = params.prompt.empty() ? k_prompt_llama : params.prompt;
+
+    std::cout <<  "prompt_llama : " << prompt_llama << std::endl;
 
     // need to have leading ' '
     prompt_llama.insert(0, 1, ' ');
@@ -508,8 +535,10 @@ int main(int argc, char ** argv) {
         int64_t t_ms = 0;
 
         {
+            // オーディオデータを取得
             audio.get(2000, pcmf32_cur);
 
+            // オーディオデータがない場合はスキップ
             if (::vad_simple(pcmf32_cur, WHISPER_SAMPLE_RATE, 1250, params.vad_thold, params.freq_thold, params.print_energy) || force_speak) {
                 //fprintf(stdout, "%s: Speech detected! Processing ...\n", __func__);
 
@@ -520,84 +549,83 @@ int main(int argc, char ** argv) {
                 if (!force_speak) {
                     all_heard = ::trim(::transcribe(ctx_wsp, params, pcmf32_cur, prompt_whisper, prob0, t_ms));
                 }
-
-                const auto words = get_words(all_heard);
-
-                std::string wake_cmd_heard;
-                std::string text_heard;
-
-                for (int i = 0; i < (int) words.size(); ++i) {
-                    if (i < wake_cmd_length) {
-                        wake_cmd_heard += words[i] + " ";
-                    } else {
-                        text_heard += words[i] + " ";
-                    }
-                }
-
-                // check if audio starts with the wake-up command if enabled
-                if (use_wake_cmd) {
-                    const float sim = similarity(wake_cmd_heard, wake_cmd);
-
-                    if ((sim < 0.7f) || (text_heard.empty())) {
-                        audio.clear();
-                        continue;
-                    }
-                }
-
-                // optionally give audio feedback that the current text is being processed
-                if (!params.heard_ok.empty()) {
-                    int ret = system((params.speak + " " + std::to_string(voice_id) + " '" + params.heard_ok + "'").c_str());
-                    if (ret != 0) {
-                        fprintf(stderr, "%s: failed to speak\n", __func__);
-                    }
-                }
-
-                // remove text between brackets using regex
-                {
-                    std::regex re("\\[.*?\\]");
-                    text_heard = std::regex_replace(text_heard, re, "");
-                }
-
-                // remove text between brackets using regex
-                {
-                    std::regex re("\\(.*?\\)");
-                    text_heard = std::regex_replace(text_heard, re, "");
-                }
-
-                // remove all characters, except for letters, numbers, punctuation and ':', '\'', '-', ' '
-                text_heard = std::regex_replace(text_heard, std::regex("[^a-zA-Z0-9\\.,\\?!\\s\\:\\'\\-]"), "");
-
-                // take first line
-                text_heard = text_heard.substr(0, text_heard.find_first_of('\n'));
-
-                // remove leading and trailing whitespace
-                text_heard = std::regex_replace(text_heard, std::regex("^\\s+"), "");
-                text_heard = std::regex_replace(text_heard, std::regex("\\s+$"), "");
-
-                const std::vector<llama_token> tokens = llama_tokenize(ctx_llama, text_heard.c_str(), false);
-
-                if (text_heard.empty() || tokens.empty() || force_speak) {
-                    //fprintf(stdout, "%s: Heard nothing, skipping ...\n", __func__);
-                    audio.clear();
-
-                    continue;
-                }
-
-                force_speak = false;
-
-                text_heard.insert(0, 1, ' ');
-                text_heard += "\n" + params.bot_name + chat_symb;
-                fprintf(stdout, "%s%s%s", "\033[1m", text_heard.c_str(), "\033[0m");
+//                const auto words = get_words(all_heard);
+//
+//                std::string wake_cmd_heard;
+//                std::string text_heard;
+//
+//                for (int i = 0; i < (int) words.size(); ++i) {
+//                    if (i < wake_cmd_length) {
+//                        wake_cmd_heard += words[i] + " ";
+//                    } else {
+//                        text_heard += words[i] + " ";
+//                    }
+//                }
+//
+//                // check if audio starts with the wake-up command if enabled
+//                if (use_wake_cmd) {
+//                    const float sim = similarity(wake_cmd_heard, wake_cmd);
+//
+//                    if ((sim < 0.7f) || (text_heard.empty())) {
+//                        audio.clear();
+//                        continue;
+//                    }
+//                }
+//
+//                // optionally give audio feedback that the current text is being processed
+//                if (!params.heard_ok.empty()) {
+//                    int ret = system((params.speak + " " + std::to_string(voice_id) + " '" + params.heard_ok + "'").c_str());
+//                    if (ret != 0) {
+//                        fprintf(stderr, "%s: failed to speak\n", __func__);
+//                    }
+//                }
+//
+//                // remove text between brackets using regex
+//                {
+//                    std::regex re("\\[.*?\\]");
+//                    text_heard = std::regex_replace(text_heard, re, "");
+//                }
+//
+//                // remove text between brackets using regex
+//                {
+//                    std::regex re("\\(.*?\\)");
+//                    text_heard = std::regex_replace(text_heard, re, "");
+//                }
+//
+//                // remove all characters, except for letters, numbers, punctuation and ':', '\'', '-', ' '
+//                text_heard = std::regex_replace(text_heard, std::regex("[^a-zA-Z0-9\\.,\\?!\\s\\:\\'\\-]"), "");
+//
+//                // take first line
+//                text_heard = text_heard.substr(0, text_heard.find_first_of('\n'));
+//
+//                // remove leading and trailing whitespace
+//                text_heard = std::regex_replace(text_heard, std::regex("^\\s+"), "");
+//                text_heard = std::regex_replace(text_heard, std::regex("\\s+$"), "");
+//
+                const std::vector<llama_token> tokens = llama_tokenize(ctx_llama, all_heard.c_str(), false);
+//
+//                if (text_heard.empty() || tokens.empty() || force_speak) {
+//                    //fprintf(stdout, "%s: Heard nothing, skipping ...\n", __func__);
+//                    audio.clear();
+//
+//                    continue;
+//                }
+//
+//                force_speak = false;
+//
+//                text_heard.insert(0, 1, ' ');
+//                text_heard += "\n" + params.bot_name + chat_symb;
+                fprintf(stdout, "%s%s%s", "\033[1m", all_heard.c_str(), "\033[0m");
                 fflush(stdout);
 
-                embd = ::llama_tokenize(ctx_llama, text_heard, false);
+                embd = ::llama_tokenize(ctx_llama, all_heard, false);
 
                 // Append the new input tokens to the session_tokens vector
                 if (!path_session.empty()) {
                     session_tokens.insert(session_tokens.end(), tokens.begin(), tokens.end());
                 }
 
-                // text inference
+                // テキストを発話
                 bool done = false;
                 std::string text_to_speak;
                 while (true) {
@@ -676,7 +704,6 @@ int main(int argc, char ** argv) {
                         }
 
                         llama_token id = 0;
-
                         {
                             auto logits = llama_get_logits(ctx_llama);
                             auto n_vocab = llama_n_vocab(model_llama);
@@ -747,11 +774,11 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                text_to_speak = ::replace(text_to_speak, "'", "'\"'\"'");
-                int ret = system((params.speak + " " + std::to_string(voice_id) + " '" + text_to_speak + "'").c_str());
-                if (ret != 0) {
-                    fprintf(stderr, "%s: failed to speak\n", __func__);
-                }
+//                text_to_speak = ::replace(text_to_speak, "'", "'\"'\"'");
+//                int ret = system((params.speak + " " + std::to_string(voice_id) + " '" + text_to_speak + "'").c_str());
+//                if (ret != 0) {
+//                    fprintf(stderr, "%s: failed to speak\n", __func__);
+//                }
 
                 audio.clear();
             }

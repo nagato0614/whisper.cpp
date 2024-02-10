@@ -749,29 +749,42 @@ bool vad_simple(std::vector<float> & pcmf32, int sample_rate, int last_ms, float
     return true;
 }
 
+// 二つの文字列間の類似度を計算する関数
 float similarity(const std::string & s0, const std::string & s1) {
-    const size_t len0 = s0.size() + 1;
-    const size_t len1 = s1.size() + 1;
+  // 文字列の長さに1を加えた値を計算（動的計画法のテーブル作成のため）
+  const size_t len0 = s0.size() + 1;
+  const size_t len1 = s1.size() + 1;
 
-    std::vector<int> col(len1, 0);
-    std::vector<int> prevCol(len1, 0);
+  // 動的計画法による編集距離の計算のための現在行と前行のベクタ
+  std::vector<int> col(len1, 0);
+  std::vector<int> prevCol(len1, 0);
 
-    for (size_t i = 0; i < len1; i++) {
-        prevCol[i] = i;
+  // prevColを初期化（最初の行は、0から文字列の長さまでの連番になる）
+  for (size_t i = 0; i < len1; i++) {
+    prevCol[i] = i;
+  }
+
+  // 二つの文字列の各文字に対して編集距離を計算
+  for (size_t i = 0; i < len0; i++) {
+    col[0] = i;
+    for (size_t j = 1; j < len1; j++) {
+      // 編集操作（挿入、削除、置換）のコストを計算し、最小コストを選択
+      // 置換の場合、二つの文字が同じ場合のコストは0、異なる場合は1
+      col[j] = std::min(std::min(1 + col[j - 1], 1 + prevCol[j]),
+                        prevCol[j - 1] + (i > 0 && s0[i - 1] == s1[j - 1] ? 0 : 1));
     }
+    // 現在の行を計算し終えたら、次の行の計算のために現在行と前行を入れ替え
+    col.swap(prevCol);
+  }
 
-    for (size_t i = 0; i < len0; i++) {
-        col[0] = i;
-        for (size_t j = 1; j < len1; j++) {
-            col[j] = std::min(std::min(1 + col[j - 1], 1 + prevCol[j]), prevCol[j - 1] + (i > 0 && s0[i - 1] == s1[j - 1] ? 0 : 1));
-        }
-        col.swap(prevCol);
-    }
+  // 最後のprevColの最後の要素が、二つの文字列間の編集距離（最小操作数）
+  const float dist = prevCol[len1 - 1];
 
-    const float dist = prevCol[len1 - 1];
-
-    return 1.0f - (dist / std::max(s0.size(), s1.size()));
+  // 1から編集距離を引くことで類似度を計算（類似度が高いほど値は1に近づく）
+  // 編集距離を二つの文字列の長さの最大値で正規化して、類似度を計算
+  return 1.0f - (dist / std::max(s0.size(), s1.size()));
 }
+
 
 bool sam_params_parse(int argc, char ** argv, sam_params & params) {
     for (int i = 1; i < argc; i++) {
